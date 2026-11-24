@@ -1,18 +1,24 @@
 
-name: JARVIS Android APK Builder
+name: JARVIS - Android APK Builder
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: jarvis-apk-build
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build JARVIS APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Repository
@@ -24,34 +30,103 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Extract JARVIS ZIP
+      - name: Install Unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Extract Android Project
+        shell: bash
         run: |
+          set -e
+
+          ZIP_FILE="Jarvis final.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: Jarvis final.zip not found!"
+            ls -la
+            exit 1
+          fi
+
           mkdir -p extracted
-          unzip -q "Jarvis final.zip" -d extracted
+          unzip -o "$ZIP_FILE" -d extracted
+
+      - name: Locate Gradle Project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find extracted -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Gradle settings file not found!"
+            find extracted -maxdepth 5 -type f
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Project found: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
 
       - name: Verify Android Project
+        shell: bash
         run: |
-          cd extracted/jarvis-android
-          test -f settings.gradle.kts
-          test -f app/build.gradle.kts
-          echo "JARVIS project found!"
+          set -e
+          cd "${{ steps.project.outputs.dir }}"
+
+          test -f build.gradle.kts -o -f build.gradle
+          test -f app/build.gradle.kts -o -f app/build.gradle
+
+          echo "Android project verified."
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Build APK
+      - name: Build Debug APK
+        shell: bash
         run: |
-          cd extracted/jarvis-android
-          gradle assembleDebug
+          set -e
+          cd "${{ steps.project.outputs.dir }}"
+
+          gradle --no-daemon clean assembleDebug
+
+      - name: Find APK
+        id: apk
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find "${{ steps.project.outputs.dir }}" \
+            -type f -path "*/build/outputs/apk/debug/*.apk" \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated!"
+            exit 1
+          fi
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK generated successfully!"
 
       - name: Upload JARVIS APK
         uses: actions/upload-artifact@v4
         with:
-          name: JARVIS-APK
-          path: extracted/jarvis-android/app/build/outputs/apk/debug/*.apk
+          name: JARVIS-Android-APK
+          path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Build Summary
+        if: success()
+        run: |
+          echo "## JARVIS APK Build Successful!" >> "$GITHUB_STEP_SUMMARY"
+          echo "Your APK is ready in Actions Artifacts." >> "$GITHUB_STEP_SUMMARY"
+
 
 
